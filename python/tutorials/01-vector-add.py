@@ -27,11 +27,11 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
 @triton.jit
-def add_kernel(x_ptr,  # *Pointer* to first input vector.
-               y_ptr,  # *Pointer* to second input vector.
-               output_ptr,  # *Pointer* to output vector.
-               n_elements,  # Size of the vector.
-               BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
+def add_kernel(x_ptr: tl.pointer_type(tl.float32),  # *Pointer* to first input vector.
+               y_ptr: tl.pointer_type(tl.float32),  # *Pointer* to second input vector.
+               output_ptr: tl.pointer_type(tl.float32),  # *Pointer* to output vector.
+               n_elements: int,  # Size of the vector.
+               block_size: tl.constexpr,  # Number of elements each program should process.
                # NOTE: `constexpr` so it can be used as a shape value.
                ):
     # There are multiple 'programs' processing different data. We identify which program
@@ -41,8 +41,8 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
     # For instance, if you had a vector of length 256 and block_size of 64, the programs
     # would each access the elements [0:64, 64:128, 128:192, 192:256].
     # Note that offsets is a list of pointers:
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    block_start = pid * block_size
+    offsets = block_start + tl.arange(0, block_size)
     # Create a mask to guard memory operations against out-of-bounds accesses.
     mask = offsets < n_elements
     # Load x and y from DRAM, masking out any extra elements in case the input is not a
@@ -59,7 +59,7 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
 # and (2) enqueue the above kernel with appropriate grid/block sizes:
 
 
-def add(x: torch.Tensor, y: torch.Tensor):
+def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     # We need to preallocate the output.
     output = torch.empty_like(x)
     assert x.device == DEVICE and y.device == DEVICE and output.device == DEVICE
@@ -67,12 +67,12 @@ def add(x: torch.Tensor, y: torch.Tensor):
     # The SPMD launch grid denotes the number of kernel instances that run in parallel.
     # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
     # In this case, we use a 1D grid where the size is the number of blocks:
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    grid = lambda meta: (triton.cdiv(n_elements, meta['block_size']), )
     # NOTE:
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    add_kernel[grid](x, y, output, n_elements, block_size=1024)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
     return output
@@ -82,11 +82,11 @@ def add(x: torch.Tensor, y: torch.Tensor):
 # We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
 
 torch.manual_seed(0)
-size = 98432
-x = torch.rand(size, device=DEVICE)
-y = torch.rand(size, device=DEVICE)
-output_torch = x + y
-output_triton = add(x, y)
+size: int = 98432
+x: torch.Tensor = torch.rand(size, device=DEVICE)
+y: torch.Tensor = torch.rand(size, device=DEVICE)
+output_torch: torch.Tensor = x + y
+output_triton: torch.Tensor = add(x, y)
 print(output_torch)
 print(output_triton)
 print(f'The maximum difference between torch and triton is '
@@ -117,10 +117,10 @@ print(f'The maximum difference between torch and triton is '
         plot_name='vector-add-performance',  # Name for the plot. Used also as a file name for saving the plot.
         args={},  # Values for function arguments not in `x_names` and `y_name`.
     ))
-def benchmark(size, provider):
-    x = torch.rand(size, device=DEVICE, dtype=torch.float32)
-    y = torch.rand(size, device=DEVICE, dtype=torch.float32)
-    quantiles = [0.5, 0.2, 0.8]
+def benchmark(size: int, provider: str) -> tuple[float, float, float]:
+    x: torch.Tensor = torch.rand(size, device=DEVICE, dtype=torch.float32)
+    y: torch.Tensor = torch.rand(size, device=DEVICE, dtype=torch.float32)
+    quantiles: list[float] = [0.5, 0.2, 0.8]
     if provider == 'torch':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: x + y, quantiles=quantiles)
     if provider == 'triton':
